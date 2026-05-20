@@ -1,0 +1,33 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+.turbo/
+
+# Build outputs
+dist/
+.vite/
+
+# Data (PDFs gerados, uploads, etc.)
+packages/web/data/
+
+# Scripts de manutenção de dados
+packages/web/insert-*.mjs
+packages/web/regen-*.mjs
+packages/web/check-*.mjs
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+/tmp/
+
+# Drizzle generated
+packages/web/drizzle/
+.env.keyfix
+packages/desktop/dist-electron/

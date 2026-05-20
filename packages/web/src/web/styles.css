@@ -1,0 +1,57 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+:root {
+  --bg-base: #0a0c10;
+  --bg-surface: #111318;
+  --bg-elevated: #1a1d25;
+  --border: #1e2230;
+  --border-strong: #2a2f3d;
+
+  --blue-primary: #2563eb;
+  --blue-bright: #3b82f6;
+  --blue-glow: #1d4ed8;
+  --blue-subtle: #1e3a5f;
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #475569;
+
+  --green: #10b981;
+  --green-subtle: #064e3b;
+  --red: #ef4444;
+  --red-subtle: #450a0a;
+  --amber: #f59e0b;
+  --amber-subtle: #451a03;
+  --purple: #8b5cf6;
+  --purple-subtle: #2e1065;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Poppins', sans-serif;
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100%;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-base); }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Mono font for money */
+.font-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
