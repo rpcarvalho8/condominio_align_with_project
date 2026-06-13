@@ -153,6 +153,31 @@ export const configuracoes = sqliteTable("configuracoes", {
     .$defaultFn(() => new Date()),
 });
 
+// --- TRANSAÇÕES BANCÁRIAS (Enable Banking staging) ---
+// Recebidas via sync antes de serem importadas como quotas/despesas.
+// imported=0 → ainda não processadas (potencialmente "cativos" na conta à ordem).
+// imported=1 → já gerou quota ou despesa; import_type indica o destino.
+export const bankTransactions = sqliteTable("bank_transactions", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  connectionId: text("connection_id").references(() => bankConnections.id),
+  transactionId: text("transaction_id").unique(), // ID externo Enable Banking (dedup)
+  amount: real("amount").notNull(),               // positivo = crédito, negativo = débito
+  currency: text("currency").default("EUR"),
+  date: integer("date", { mode: "timestamp" }).notNull(),
+  description: text("description"),              // remittance_information concatenado
+  creditorName: text("creditor_name"),           // nome do credor (saídas)
+  debtorName: text("debtor_name"),               // nome do devedor/pagador (entradas)
+  type: text("type"),                            // "CRDT" | "DBIT"
+  status: text("status").default("pending"),     // "pending" | "processed" | "ignored"
+  imported: integer("imported").default(0),      // 0=não processado, 1=importado
+  importType: text("import_type"),               // "quota" | "despesa" | "cativo"
+  importRefId: text("import_ref_id"),            // ID da quota/despesa criada
+  rawData: text("raw_data"),                     // JSON raw do Enable Banking
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 // --- TIPOS DE QUOTA ---
 export const quotaTipos = sqliteTable("quota_tipos", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),

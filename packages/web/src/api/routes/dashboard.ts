@@ -2,6 +2,11 @@ import { Hono } from "hono";
 import { db } from "../database";
 import * as schema from "../database/schema";
 import { eq, and, sql } from "drizzle-orm";
+import {
+  REGRAS_CATIVO,
+  identificarDestinoCativo,
+  type GavetaCativo,
+} from "./cativo-rules";
 
 // ─────────────────────────────────────────────────────────
 // DADOS REAIS DO EXCEL — devedores por conta
@@ -166,7 +171,126 @@ const SALDO_DEFAULTS: Record<string, number> = {
   saldo_portao: 0,
   a_receber_portao: 593.27,  // 707.25 - 59.66(base) - 25.35(AI 07/05) - 28.97(AH 07/05) = 593.27
   portao_pago: 113.98,        // 59.66 + 25.35(AI 07/05) + 28.97(AH 07/05)
+  // ── Valores cativos (dinheiro na Conta à Ordem ainda não transferido) ──────
+  // Recalculados dinamicamente a partir de bank_transactions com imported=0.
+  // Se não houver sync bancário, ficam a zero (nenhum cativo detectado).
+  cativo_fundo_reserva: 0,
+  cativo_indaqua: 0,
+  cativo_incendio: 0,
+  cativo_portao: 0,
+  cativo_obras: 0,
+  // saldo_operacional_disponivel = saldo_conta_corrente − soma de todos os cativos
+  saldo_operacional_disponivel: 3388.39,
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tipo de retorno de calcularValoresCativos
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface ValoresCativos {
+  /** Total cativo por gaveta — só movimentos CRDT não importados */
+  porGaveta: Record<GavetaCativo, number>;
+  /** Total agregado de todos os cativos */
+  totalCativos: number;
+  /** Número de movimentos classificados como cativos */
+  numMovimentos: number;
+  /** Detalhe por movimento (para debug/log) */
+  movimentos: Array<{
+    id: string;
+    date: Date;
+    amount: number;
+    description: string | null;
+    debtorName: string | null;
+    gaveta: GavetaCativo;
+    label: string;
+    matchedField: string;
+    matchedPattern: string;
+  }>;
+}
+
+/**
+ * calcularValoresCativos
+ * ────────────────────────────────────────────────────────────────────────────
+ * Lê os movimentos bancários recebidos (CRDT, imported=0) que ainda não foram
+ * processados como quotas/despesas e classifica-os como "cativos" usando as
+ * REGRAS_CATIVO definidas em cativo-rules.ts.
+ *
+ * Estes fundos estão fisicamente na Conta à Ordem mas são legalmente
+ * destinados a gavetas específicas (FR, INDAQUA, Incêndio, Portão, Obras).
+ *
+ * Retorna totais por gaveta e detalhe para log/UI.
+ */
+export async function calcularValoresCativos(): Promise<ValoresCativos> {
+  const resultado: ValoresCativos = {
+    porGaveta: {
+      fundo_reserva: 0,
+      indaqua: 0,
+      incendio: 0,
+      portao: 0,
+      obras: 0,
+    },
+    totalCativos: 0,
+    numMovimentos: 0,
+    movimentos: [],
+  };
+
+  try {
+    // Buscar movimentos CRDT não importados (staging buffer)
+    // amount > 0 AND imported = 0 AND (type = 'CRDT' OR amount > 0)
+    const movimentos = await db
+      .select({
+        id: schema.bankTransactions.id,
+        date: schema.bankTransactions.date,
+        amount: schema.bankTransactions.amount,
+        description: schema.bankTransactions.description,
+        debtorName: schema.bankTransactions.debtorName,
+        type: schema.bankTransactions.type,
+      })
+      .from(schema.bankTransactions)
+      .where(and(
+        eq(schema.bankTransactions.imported, 0),
+        sql`${schema.bankTransactions.amount} > 0`,
+      ));
+
+    for (const mov of movimentos) {
+      const r = identificarDestinoCativo(
+        mov.description,
+        mov.debtorName,
+        // ibanSender não está mapeado na tabela actual — null por defeito
+        null,
+      );
+
+      if (r.gaveta === null) continue; // não é cativo — quota corrente normal
+
+      const valor = Math.abs(mov.amount);
+      resultado.porGaveta[r.gaveta] += valor;
+      resultado.totalCativos += valor;
+      resultado.numMovimentos++;
+      resultado.movimentos.push({
+        id: mov.id,
+        date: mov.date instanceof Date ? mov.date : new Date((mov.date as number) * 1000),
+        amount: valor,
+        description: mov.description,
+        debtorName: mov.debtorName,
+        gaveta: r.gaveta,
+        label: r.label!,
+        matchedField: r.matchedField!,
+        matchedPattern: r.matchedPattern!,
+      });
+    }
+
+    // Arredondar gavetas a 2 casas
+    for (const k of Object.keys(resultado.porGaveta) as GavetaCativo[]) {
+      resultado.porGaveta[k] = Math.round(resultado.porGaveta[k] * 100) / 100;
+    }
+    resultado.totalCativos = Math.round(resultado.totalCativos * 100) / 100;
+  } catch (e) {
+    // bank_transactions pode não existir em ambientes antigos — falha silenciosa
+    console.warn("[calcularValoresCativos] Tabela bank_transactions inacessível:", e);
+  }
+
+  return resultado;
+}
 
 async function getSaldos(): Promise<Record<string, number>> {
   try {
@@ -208,15 +332,35 @@ async function upsertSaldo(chave: string, valor: number): Promise<void> {
  *  - a_receber_portao     : Excel − pagos DB (quotaTipoId=PORTAO; fallback lista Excel)
  *  - a_receber_quota_extra: Excel − pagos DB (quotaTipoId=ELEV; fallback lista Excel)
  */
+/**
+ * recalcularSaldos
+ * ────────────────────────────────────────────────────────────────────────────
+ * Recalcula todos os saldos dinâmicos e persiste em `configuracoes`.
+ * Chamado após cada bank sync (bank.ts) e disponível via POST /api/dashboard/recalcular.
+ *
+ * REGRA DE OURO — gavetas estanques:
+ *   saldo_conta_corrente      = saldoBase + receitas_condominio − despesas (desde âncora)
+ *                               NÃO inclui fundoReserva, obras, INDAQUA, Incêndio, Portão.
+ *   saldo_operacional_disponivel = saldo_conta_corrente − totalCativos
+ *                               (dinheiro livre de qualquer compromisso de gaveta)
+ *   cativo_<gaveta>           = SUM(bank_transactions.amount WHERE imported=0 AND gaveta=X)
+ *                               Aumenta o saldo virtual da gaveta sem duplicar saldo_conta_corrente.
+ *   atraso_fundo_reserva      = SUM(q.fundoReserva WHERE tipo='condominio' AND pago=0)
+ *   a_receber_obras           = SUM(q.valor WHERE tipo='obras' AND pago=0)
+ *   a_receber_indaqua         = "Em dívida" de observacoes LIKE '%INDAQUA%' (pago=0)
+ *   a_receber_incendio        = SUM(q.valor WHERE observacoes LIKE '%ncen%' AND pago=0)
+ *   a_receber_portao          = Excel fallback − pagos na DB
+ *   a_receber_quota_extra     = Excel fallback − pagos na DB
+ */
 export async function recalcularSaldos(): Promise<void> {
 
   // ─────────────────────────────────────────────────────────────────────────────
   // 1. CONTA CORRENTE
   //    saldoBase + receitas_condominio_desde_ancora − despesas_desde_ancora
   //    Nota: fundoReserva NÃO entra aqui (gaveta separada).
-  //    Receitas filtradas por data_pagamento (unix ts) >= baseTs.
-  //    Despesas filtradas por data >= baseTs.
   // ─────────────────────────────────────────────────────────────────────────────
+  let saldoContaCorrente = SALDO_DEFAULTS.saldo_conta_corrente;
+
   try {
     const cfgRows = await db.select().from(schema.configuracoes);
     const cfg = Object.fromEntries(cfgRows.map(r => [r.chave, r.valor]));
@@ -243,17 +387,63 @@ export async function recalcularSaldos(): Promise<void> {
         .where(sql`${schema.despesas.data} >= ${baseTs}`);
       const totalDespesasDesdeBase = despesasDesdeBase.reduce((s, d) => s + d.valor, 0);
 
-      const saldoCorrente = saldoBase + receitasDesdeBase - totalDespesasDesdeBase;
-      await upsertSaldo("saldo_conta_corrente", Math.round(saldoCorrente * 100) / 100);
+      saldoContaCorrente = Math.round((saldoBase + receitasDesdeBase - totalDespesasDesdeBase) * 100) / 100;
+      await upsertSaldo("saldo_conta_corrente", saldoContaCorrente);
     }
   } catch (e) {
     console.error("[recalcularSaldos] saldo_conta_corrente:", e);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 2. FUNDO DE RESERVA
-  //    Sem conta bancária separada → saldo_fundo_reserva é estático (277.89).
-  //    Só actualizamos atraso_fundo_reserva (quotas condomínio não pagas).
+  // 2. VALORES CATIVOS (bank_transactions não importadas)
+  //    Para cada movimento CRDT ainda não processado, classifica por gaveta.
+  //    Subtrai o total de cativos do saldo_conta_corrente para obter o saldo
+  //    operacional real disponível para despesas correntes.
+  //    Cada cativo aumenta também o saldo virtual da sua gaveta (UI).
+  // ─────────────────────────────────────────────────────────────────────────────
+  let cativos = {
+    fundo_reserva: 0,
+    indaqua: 0,
+    incendio: 0,
+    portao: 0,
+    obras: 0,
+    total: 0,
+  };
+
+  try {
+    const resultado = await calcularValoresCativos();
+
+    cativos = {
+      ...resultado.porGaveta,
+      total: resultado.totalCativos,
+    };
+
+    // Persistir cativos por gaveta
+    await upsertSaldo("cativo_fundo_reserva", cativos.fundo_reserva);
+    await upsertSaldo("cativo_indaqua",       cativos.indaqua);
+    await upsertSaldo("cativo_incendio",      cativos.incendio);
+    await upsertSaldo("cativo_portao",        cativos.portao);
+    await upsertSaldo("cativo_obras",         cativos.obras);
+
+    if (resultado.numMovimentos > 0) {
+      console.log(`[recalcularSaldos] ${resultado.numMovimentos} movimentos cativos detectados — total: ${cativos.total.toFixed(2)}€`);
+      for (const m of resultado.movimentos) {
+        console.log(`  [${m.gaveta}] ${m.amount.toFixed(2)}€ — "${(m.description ?? "").slice(0, 60)}" (match: ${m.matchedField})`);
+      }
+    }
+  } catch (e) {
+    console.error("[recalcularSaldos] cativos:", e);
+  }
+
+  // saldo_operacional_disponivel = saldo bruto − cativos comprometidos com gavetas
+  const saldoOperacional = Math.round((saldoContaCorrente - cativos.total) * 100) / 100;
+  await upsertSaldo("saldo_operacional_disponivel", saldoOperacional);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 3. FUNDO DE RESERVA
+  //    saldo_fundo_reserva = estático (277.89) + cativos classificados como FR.
+  //    Nota: cativos.fundo_reserva já foi persistido em cativo_fundo_reserva.
+  //    Só actualizamos atraso_fundo_reserva (quotas não pagas).
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     const fundoEmAtrasoRows = await db
@@ -267,13 +457,20 @@ export async function recalcularSaldos(): Promise<void> {
     if (atrasoFundoBD > 0) {
       await upsertSaldo("atraso_fundo_reserva", Math.round(atrasoFundoBD * 100) / 100);
     }
+
+    // Saldo virtual FR = base estático + cativos FR ainda não transferidos
+    const saldoFRVirtual = Math.round(
+      (SALDO_DEFAULTS.saldo_fundo_reserva + cativos.fundo_reserva) * 100
+    ) / 100;
+    await upsertSaldo("saldo_fundo_reserva", saldoFRVirtual);
   } catch (e) {
-    console.error("[recalcularSaldos] atraso_fundo_reserva:", e);
+    console.error("[recalcularSaldos] fundo_reserva:", e);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 3. OBRAS
-  //    Gaveta separada — não afecta conta corrente.
+  // 4. OBRAS
+  //    a_receber_obras = DB (se existir) ou fallback Excel.
+  //    saldo_obras (virtual) = base + cativos de obras ainda na Conta à Ordem.
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     const obrasEmAtraso = await db
@@ -282,26 +479,25 @@ export async function recalcularSaldos(): Promise<void> {
       .where(and(eq(schema.quotas.tipo, "obras"), eq(schema.quotas.pago, false)));
     const aReceberObrasBD = obrasEmAtraso.reduce((s, q) => s + q.valor, 0);
 
-    const obrasPagas = await db
-      .select({ valor: schema.quotas.valor })
-      .from(schema.quotas)
-      .where(and(eq(schema.quotas.tipo, "obras"), eq(schema.quotas.pago, true)));
-    const pagoObrasBD = obrasPagas.reduce((s, q) => s + q.valor, 0);
-
-    if (aReceberObrasBD > 0 || pagoObrasBD > 0) {
+    if (aReceberObrasBD > 0) {
       await upsertSaldo("a_receber_obras", Math.round(aReceberObrasBD * 100) / 100);
+    }
+
+    // Saldo virtual obras += cativos identificados como obras
+    if (cativos.obras > 0) {
+      const saldoObrasVirtual = Math.round(
+        (SALDO_DEFAULTS.saldo_obras + cativos.obras) * 100
+      ) / 100;
+      await upsertSaldo("saldo_obras", saldoObrasVirtual);
     }
   } catch (e) {
     console.error("[recalcularSaldos] obras:", e);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 4. INDAQUA (Quota Extra Elevadores)
-  //    quotaTipoId está NULL na DB (importado sem tipo ligado).
-  //    Identificação via observacoes LIKE '%INDAQUA%'.
-  //    O campo `valor` contém o total histórico da fraccão, NÃO a dívida actual.
-  //    A dívida real está na string "Em dívida: X€" dentro de observacoes.
-  //    Extraímos esse valor em JS para calcular a_receber_indaqua.
+  // 5. INDAQUA (Quota Extra Elevadores)
+  //    Identificação via observacoes LIKE '%INDAQUA%' (quotaTipoId=NULL na DB).
+  //    saldo_quota_extra (virtual) += cativos INDAQUA ainda na Conta à Ordem.
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     const indaquaRows = await db
@@ -309,8 +505,6 @@ export async function recalcularSaldos(): Promise<void> {
       .from(schema.quotas)
       .where(sql`${schema.quotas.observacoes} LIKE '%INDAQUA%'`);
 
-    // Para quotas não pagas, extrair "Em dívida: X€" das observacoes (fonte de verdade)
-    // Para quotas pagas, valor=0 (já liquidadas)
     const aReceberIndaqua = indaquaRows.reduce((s, q) => {
       if (q.pago) return s;
       const m = q.observacoes?.match(/Em d[ií]vida: ([\d.]+)€/);
@@ -318,14 +512,22 @@ export async function recalcularSaldos(): Promise<void> {
     }, 0);
 
     await upsertSaldo("a_receber_indaqua", Math.round(aReceberIndaqua * 100) / 100);
+
+    // Saldo virtual INDAQUA += cativos ainda na Conta à Ordem
+    if (cativos.indaqua > 0) {
+      const saldoIndaquaVirtual = Math.round(
+        (SALDO_DEFAULTS.saldo_quota_extra + cativos.indaqua) * 100
+      ) / 100;
+      await upsertSaldo("saldo_quota_extra", saldoIndaquaVirtual);
+    }
   } catch (e) {
     console.error("[recalcularSaldos] indaqua:", e);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 5. INCÊNDIO (Obras Incêndio)
-  //    quotaTipoId NULL — identificação via observacoes LIKE '%ncen%'.
-  //    Campo valor = dívida da fraccão (todas pago=0 → soma directa).
+  // 6. INCÊNDIO
+  //    Identificação via observacoes LIKE '%ncen%'.
+  //    saldo_incendio (virtual) += cativos de incêndio ainda na Conta à Ordem.
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     const incendioRows = await db
@@ -337,14 +539,22 @@ export async function recalcularSaldos(): Promise<void> {
       ));
     const aReceberIncendio = incendioRows.reduce((s, q) => s + q.valor, 0);
     await upsertSaldo("a_receber_incendio", Math.round(aReceberIncendio * 100) / 100);
+
+    // Saldo virtual incêndio += cativos ainda na Conta à Ordem
+    if (cativos.incendio > 0) {
+      const saldoIncendioVirtual = Math.round(
+        (SALDO_DEFAULTS.saldo_incendio + cativos.incendio) * 100
+      ) / 100;
+      await upsertSaldo("saldo_incendio", saldoIncendioVirtual);
+    }
   } catch (e) {
     console.error("[recalcularSaldos] incendio:", e);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 6. PORTÃO GARAGEM
-  //    Tenta quotaTipoId (quota_tipos pode estar vazia). Se não houver registos,
-  //    cai no fallback Excel (PORTAO_DEVEDORES_EXCEL).
+  // 7. PORTÃO GARAGEM
+  //    a_receber_portao = Excel − pagos na DB (fallback se quotaTipoId vazio).
+  //    saldo_portao (virtual) += cativos de portão ainda na Conta à Ordem.
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     const portaoPagosRows = await db
@@ -372,13 +582,21 @@ export async function recalcularSaldos(): Promise<void> {
 
     await upsertSaldo("a_receber_portao", aReceberPortao);
     if (pagoPortao > 0) await upsertSaldo("portao_pago", pagoPortao);
+
+    // Saldo virtual portão += cativos ainda na Conta à Ordem
+    if (cativos.portao > 0) {
+      const saldoPortaoVirtual = Math.round(
+        (SALDO_DEFAULTS.saldo_portao + cativos.portao) * 100
+      ) / 100;
+      await upsertSaldo("saldo_portao", saldoPortaoVirtual);
+    }
   } catch (e) {
     console.error("[recalcularSaldos] portao:", e);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 7. QUOTA EXTRA ELEVADORES (ELEV_TIPO_ID)
-  //    Mesmo padrão do portão — quotaTipoId ou fallback Excel.
+  // 8. QUOTA EXTRA ELEVADORES (ELEV_TIPO_ID)
+  //    a_receber_quota_extra = Excel − pagos na DB.
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     const elevPagosRows = await db
@@ -632,6 +850,17 @@ export const dashboard = new Hono()
 
     const saldos = await getSaldos();
 
+    // ===== VALORES CATIVOS — movimentos bancários não processados na Conta à Ordem =====
+    // Lê bank_transactions(imported=0, amount>0) e classifica por gaveta via REGRAS_CATIVO.
+    // Falha graciosamente se a tabela não existir (ambientes antigos).
+    const cativos = await calcularValoresCativos();
+
+    // saldo_operacional_disponivel persiste em configuracoes via recalcularSaldos().
+    // No GET, calculamos inline para garantir frescura mesmo sem sync recente.
+    const saldoOperacionalDisponivel = Math.round(
+      (saldos.saldo_conta_corrente - cativos.totalCativos) * 100
+    ) / 100;
+
     // ===== PORTÃO GARAGEM e QUOTA EXTRA — derivados do extrasSecoes (100% dinâmico) =====
     // Os extrasSecoes já leram da DB todos os quotaTipos de tipo "extra" e os seus devedores.
     // Identificamos portão e elevadores pelo quotaTipoId conhecido.
@@ -760,6 +989,33 @@ export const dashboard = new Hono()
       // Pagamentos bancários confirmados mas NÃO categorizados no Excel pelo condomínio
       // Estes criam discrepâncias entre o que o Excel mostra e a realidade bancária
       pagamentosNaoRegistados: PAGAMENTOS_NAO_CATEGORIZADOS,
+
+      // ── SALDO OPERACIONAL (nova gaveta de topo) ─────────────────────────────
+      // saldoContaCorrenteTotal = saldo físico bancário (inclui cativos)
+      // valoresCativos          = dinheiro comprometido com gavetas (ainda não transferido)
+      // saldoOperacionalDisponivel = o que pode ser gasto em despesas correntes
+      saldoContaCorrenteTotal: saldos.saldo_conta_corrente,
+      saldoOperacionalDisponivel,
+      valoresCativos: {
+        // Totais por gaveta
+        fundoReserva: cativos.porGaveta.fundo_reserva,
+        indaqua:      cativos.porGaveta.indaqua,
+        incendio:     cativos.porGaveta.incendio,
+        portao:       cativos.porGaveta.portao,
+        obras:        cativos.porGaveta.obras,
+        total:        cativos.totalCativos,
+        // Número de movimentos não processados classificados como cativos
+        numMovimentos: cativos.numMovimentos,
+        // Detalhe por movimento (para debug; omitir na UI de produção se necessário)
+        movimentos: cativos.movimentos,
+      },
+      // Regras de classificação activas (permite UI de configuração futura)
+      regrasCativo: REGRAS_CATIVO.map(r => ({
+        gaveta: r.gaveta,
+        label: r.label,
+        patterns: r.patterns.map(p => p.toString()),
+        ibansSender: r.ibansSender ?? [],
+      })),
     }, 200);
   })
   // Quick morosos count for sidebar badge
