@@ -60,50 +60,42 @@ const PORTAO_TIPO_ID   = "06d6dd01-04ac-4ea3-8359-ec705f78de7c";
 const ELEV_TIPO_ID     = "4696eef9-bd1f-46ff-a368-47cfd455eeca";
 const INCENDIO_TIPO_ID = "dd16bd50-a2ab-4387-9d70-95822b1a61d7";
 
+// Fonte da verdade: Valores_Condomínio.xlsx col L ("Valores em dívida Quota Extra Obras")
+// Actualizado: 2026-06-15 — total real = 5358.51€
 const OBRAS_DEVEDORES_EXCEL = [
-  { fracao: { id: "L",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",    andar: 1 }, total: 2110.97, quotas: [] },
-  { fracao: { id: "AG", numero: "AG", proprietarioNome: "João Pedro Amorim Dias",             andar: 2 }, total: 581.86,  quotas: [] },
-  { fracao: { id: "AC", numero: "AC", proprietarioNome: "Maria de Fátima Martins Ascenção",   andar: 0 }, total: 607.35,  quotas: [] },
-  { fracao: { id: "AD", numero: "AD", proprietarioNome: "Escutoglamour Unipessoal, Lda",      andar: 0 }, total: 629.51,  quotas: [] },
-  { fracao: { id: "G",  numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",      andar: 0 }, total: 1160.63, quotas: [] },
-  { fracao: { id: "X",  numero: "X",  proprietarioNome: "Alexandre Ribeiro Maia",             andar: 1 }, total: 315.57,  quotas: [] },
-  { fracao: { id: "M",  numero: "M",  proprietarioNome: "Jannara Maria dos Santos",           andar: 1 }, total: 358.85,  quotas: [] },
+  { fracao: { id: "L",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",              andar: 1 }, total: 2110.97, quotas: [] },
+  { fracao: { id: "G",  numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",               andar: 0 }, total: 1160.63, quotas: [] },
+  { fracao: { id: "AD", numero: "AD", proprietarioNome: "Escutoglamour Unipessoal, Lda",               andar: 0 }, total:  629.51, quotas: [] },
+  { fracao: { id: "AC", numero: "AC", proprietarioNome: "Maria de Fátima Martins Ascenção",            andar: 0 }, total:  607.35, quotas: [] },
+  { fracao: { id: "AG", numero: "AG", proprietarioNome: "João Pedro Amorim Dias / Maggy Torres Guevara", andar: 2 }, total: 284.27, quotas: [] },
+  { fracao: { id: "X",  numero: "X",  proprietarioNome: "Alexandre Ribeiro Maia",                     andar: 1 }, total:  278.30, quotas: [] },
+  { fracao: { id: "N",  numero: "N",  proprietarioNome: "Filipe Daniel F. Teixeira",                   andar: 1 }, total:  178.63, quotas: [] },
+  { fracao: { id: "M",  numero: "M",  proprietarioNome: "Jannara Maria dos Santos",                    andar: 1 }, total:  108.85, quotas: [] },
 ].sort((a, b) => b.total - a.total);
 
-// Sheet 5 — Quota Extra em dívida (coluna "VALOR EM DÍVIDA" > 1€)
-const QUOTA_EXTRA_DEVEDORES_EXCEL = [
-  { fracao: { id: "L",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",    andar: 1 }, total: 323.24,  quotas: [] },
-  { fracao: { id: "R",  numero: "R",  proprietarioNome: "Vanessa Cristina Araújo Silva",      andar: 2 }, total: 98.77,   quotas: [] },
-  { fracao: { id: "U",  numero: "U",  proprietarioNome: "Catarina Reis Azevedo da Silva",     andar: 2 }, total: 99.57,   quotas: [] },
-  { fracao: { id: "P",  numero: "P",  proprietarioNome: "Nuno Ricardo de Sá Ribeiro",         andar: 1 }, total: 75.36,   quotas: [] },
-  { fracao: { id: "O",  numero: "O",  proprietarioNome: "Pedro Miguel R. Santos",             andar: 1 }, total: 72.69,   quotas: [] },
-  // AH: 71.29€ base - 28.97€ portão pago 07/05/2026 = 42.32€ (só elevadores resta)
-  { fracao: { id: "AH", numero: "AH", proprietarioNome: "Mª Madalena Costa F. Ramos",        andar: 2 }, total: 42.32,   quotas: [] },
-  { fracao: { id: "J",  numero: "J",  proprietarioNome: "Mª da Conceição S. Moreira",        andar: 0 }, total: 67.53,   quotas: [] },
-  { fracao: { id: "M",  numero: "M",  proprietarioNome: "Jannara Maria dos Santos",           andar: 1 }, total: 68.75,   quotas: [] },
-  { fracao: { id: "T",  numero: "T",  proprietarioNome: "Susana Daniela Oliveira e Silva",   andar: 2 }, total: 67.01,   quotas: [] },
-  // AI: 62.40€ base - 25.35€ portão pago 07/05/2026 = 37.05€ (só elevadores resta)
-  { fracao: { id: "AI", numero: "AI", proprietarioNome: "Rui Carvalho",                       andar: 3 }, total: 37.05,   quotas: [] },
-  { fracao: { id: "AG", numero: "AG", proprietarioNome: "João Pedro Amorim Dias",             andar: 2 }, total: 61.63,   quotas: [] },
-  { fracao: { id: "AF", numero: "AF", proprietarioNome: "Rui Alexandre Silva Torres",         andar: 2 }, total: 61.28,   quotas: [] },
-  { fracao: { id: "AA", numero: "AA", proprietarioNome: "Olivia Cândida Ferreira Lima",       andar: 3 }, total: 61.02,   quotas: [] },
-  { fracao: { id: "AB", numero: "AB", proprietarioNome: "Ilídio António Morais Marinho",      andar: 3 }, total: 60.92,   quotas: [] },
-  { fracao: { id: "AJ", numero: "AJ", proprietarioNome: "Mariana da Silva Reis",              andar: 3 }, total: 60.17,   quotas: [] },
-  { fracao: { id: "AE", numero: "AE", proprietarioNome: "Germano A. M. Machado",              andar: 2 }, total: 64.40,   quotas: [] },
-  { fracao: { id: "Z",  numero: "Z",  proprietarioNome: "Ana Isabel Dias Costa",              andar: 3 }, total: 95.99,   quotas: [] },
-  { fracao: { id: "X2", numero: "X",  proprietarioNome: "Alexandre Ribeiro Maia",             andar: 1 }, total: 68.09,   quotas: [] },
-  { fracao: { id: "Q",  numero: "Q",  proprietarioNome: "João Carlos Sousa Barros",           andar: 1 }, total: 64.64,   quotas: [] },
-  { fracao: { id: "S",  numero: "S",  proprietarioNome: "Célia Beatriz Sá",                  andar: 1 }, total: 56.29,   quotas: [] },
-  { fracao: { id: "V",  numero: "V",  proprietarioNome: "Sérgio Miguel da S. Monteiro",       andar: 2 }, total: 59.26,   quotas: [] },
-  { fracao: { id: "N",  numero: "N",  proprietarioNome: "Filipe Daniel F. Teixeira",          andar: 1 }, total: 33.78,   quotas: [] },
-  { fracao: { id: "G2", numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",      andar: 0 }, total: 23.87,   quotas: [] },
-].sort((a, b) => b.total - a.total);
-
-// Sheet 6 — Incêndio em dívida
+// Fonte da verdade: Valores_Condomínio.xlsx col O ("Valores em dívida Quota Extra Incêndio")
+// Actualizado: 2026-06-15 — total real = 110.12€
 const INCENDIO_DEVEDORES_EXCEL = [
   { fracao: { id: "G3", numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",    andar: 0 }, total: 60.72, quotas: [] },
-  { fracao: { id: "AC2",numero: "AC", proprietarioNome: "Maria de Fátima Martins Ascenção", andar: 0 }, total: 47.87, quotas: [] },
   { fracao: { id: "AD2",numero: "AD", proprietarioNome: "Escutoglamour Unipessoal, Lda",    andar: 0 }, total: 49.40, quotas: [] },
+].sort((a, b) => b.total - a.total);
+
+// Fonte da verdade: Valores_Condomínio.xlsx col R ("Valores em dívida Quota extra Indaqua + elevadores")
+// Actualizado: 2026-06-15 — total real = 308.21€
+// NOTA: esta coluna substitui QUOTA_EXTRA_DEVEDORES_EXCEL para a gaveta Indaqua+Elevadores
+const INDAQUA_DEVEDORES_EXCEL = [
+  { fracao: { id: "L_iq",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",              andar: 1 }, total: 250.56, quotas: [] },
+  { fracao: { id: "N_iq",  numero: "N",  proprietarioNome: "Filipe Daniel F. Teixeira",                   andar: 1 }, total:  33.78, quotas: [] },
+  { fracao: { id: "G_iq",  numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",               andar: 0 }, total:  23.87, quotas: [] },
+].sort((a, b) => b.total - a.total);
+
+// Fonte da verdade: Valores_Condomínio.xlsx col U ("Valores em dívida Quota extra motor")
+// Actualizado: 2026-06-15 — total real = 98.48€
+const MOTOR_DEVEDORES_EXCEL = [
+  { fracao: { id: "L_m",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",              andar: 1 }, total: 29.53, quotas: [] },
+  { fracao: { id: "X_m",  numero: "X",  proprietarioNome: "Alexandre Ribeiro Maia",                     andar: 1 }, total: 27.67, quotas: [] },
+  { fracao: { id: "AG_m", numero: "AG", proprietarioNome: "João Pedro Amorim Dias / Maggy Torres Guevara", andar: 2 }, total: 25.04, quotas: [] },
+  { fracao: { id: "G_m",  numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",               andar: 0 }, total: 16.24, quotas: [] },
 ].sort((a, b) => b.total - a.total);
 
 // Sheet 7 — Portão da Garagem — valores por fração (Orçamento OR M/123, 707,25€ com IVA)
@@ -606,7 +598,7 @@ export async function recalcularSaldos(): Promise<void> {
         eq(schema.quotas.pago, true),
       ));
     const elevPagosNums = new Set(elevPagosRows.map(r => r.numero).filter(Boolean));
-    const elevMorosos = QUOTA_EXTRA_DEVEDORES_EXCEL.filter(d => !elevPagosNums.has(d.fracao.numero));
+    const elevMorosos = INDAQUA_DEVEDORES_EXCEL.filter(d => !elevPagosNums.has(d.fracao.numero));
     const aReceberElev = Math.round(elevMorosos.reduce((s, d) => s + d.total, 0) * 100) / 100;
     await upsertSaldo("a_receber_quota_extra", aReceberElev);
   } catch (e) {
@@ -941,8 +933,9 @@ export const dashboard = new Hono()
       ? Math.round(portaoExtraDB.totalPago * 100) / 100
       : Math.round((707.25 - portaoAReceberDinamico) * 100) / 100;
 
-    // --- QUOTA EXTRA (elevadores) ---
-    // Mesma lógica: Excel base − quem pagou na DB
+    // --- INDAQUA + ELEVADORES (Quota Extra) ---
+    // Fonte: col R do Excel ("Valores em dívida Quota extra Indaqua + elevadores")
+    // Lógica: base Excel − quem já pagou na DB (via quotaTipoId ELEV)
     const elevPagosRows = await db
       .select({ numero: schema.fracoes.numero })
       .from(schema.quotas)
@@ -954,11 +947,46 @@ export const dashboard = new Hono()
       ));
     const elevPagosNums = new Set(elevPagosRows.map(r => r.numero).filter(Boolean));
 
-    const quotaExtraMorososDinamico = QUOTA_EXTRA_DEVEDORES_EXCEL.filter(d => !elevPagosNums.has(d.fracao.numero));
+    // Usar INDAQUA_DEVEDORES_EXCEL (col R Excel) como fonte de verdade
+    const quotaExtraMorososDinamico = INDAQUA_DEVEDORES_EXCEL.filter(d => !elevPagosNums.has(d.fracao.numero));
     const quotaExtraAReceberDinamico = Math.round(quotaExtraMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
 
+    // --- MOTOR GARAGEM ---
+    // Fonte: col U do Excel ("Valores em dívida Quota extra motor")
+    // Total real = 98.48€ para 4 frações
+    // Lógica: fracoes_com_divida_motor (fracoes.motor_divida > 0) − quem pagou na DB
+    const motorPagosRows = await db
+      .select({ numero: schema.fracoes.numero })
+      .from(schema.quotas)
+      .leftJoin(schema.fracoes, eq(schema.quotas.fracaoId, schema.fracoes.id))
+      .where(and(
+        eq(schema.quotas.tipo, "extra"),
+        eq(schema.quotas.quotaTipoId, PORTAO_TIPO_ID), // portão = motor garagem (mesmo tipo)
+        eq(schema.quotas.pago, true)
+      ));
+    // Motor: usar MOTOR_DEVEDORES_EXCEL subtraindo pagamentos confirmados da DB
+    // NOTA: portão e motor partilham o mesmo quotaTipoId; motor_divida na BD distingue-os.
+    // Como alternativa mais robusta: ler directamente de fracoes.motor_divida
+    const motorDividaBD = await db
+      .select({ numero: schema.fracoes.numero, motor: schema.fracoes.motorDivida })
+      .from(schema.fracoes)
+      .where(sql`${schema.fracoes.motorDivida} > 0`);
+
+    const motorMorososDinamico = motorDividaBD.length > 0
+      ? motorDividaBD
+          .filter(r => r.numero != null)
+          .map(r => ({
+            fracao: { id: r.numero!, numero: r.numero!, proprietarioNome: "", andar: 0 },
+            total: Math.round((r.motor ?? 0) * 100) / 100,
+            quotas: [],
+          }))
+          .sort((a, b) => b.total - a.total)
+      : MOTOR_DEVEDORES_EXCEL;
+    const motorAReceberDinamico = Math.round(motorMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
+
     // --- INCÊNDIO ---
-    // Mesma lógica: Excel base − quem pagou na DB
+    // Fonte: col O do Excel ("Valores em dívida Quota Extra Incêndio")
+    // Total real = 110.12€ para 2 frações (G + AD)
     const incPagosRows = await db
       .select({ numero: schema.fracoes.numero })
       .from(schema.quotas)
@@ -999,9 +1027,14 @@ export const dashboard = new Hono()
       },
       obras: {
         totalPago: totalObrasPago,
-        // Se BD sem dados, usar valor real do Excel
-        totalAtraso: totalObrasAtraso > 0 ? totalObrasAtraso : (saldos.a_receber_obras ?? 0),
-        totalTotal: totalObrasTotal > 0 ? totalObrasTotal : (totalObrasPago + (saldos.a_receber_obras ?? 0)),
+        // Fonte primária: fracoes.obras_divida (seeded do Excel col L)
+        // Fallback: quotas table > configuracoes > Excel hardcoded
+        totalAtraso: totalObrasAtraso > 0
+          ? totalObrasAtraso
+          : (saldos.a_receber_obras ?? OBRAS_DEVEDORES_EXCEL.reduce((s, d) => s + d.total, 0)),
+        totalTotal: totalObrasTotal > 0
+          ? totalObrasTotal
+          : (totalObrasPago + (saldos.a_receber_obras ?? OBRAS_DEVEDORES_EXCEL.reduce((s, d) => s + d.total, 0))),
         fracoesEmAtraso: obrasEmAtraso.length > 0 ? obrasEmAtraso.length : OBRAS_DEVEDORES_EXCEL.length,
         morosos: obrasEmAtraso.length > 0 ? obrasEmAtraso : OBRAS_DEVEDORES_EXCEL,
         saldoConta: saldos.saldo_obras,
@@ -1014,18 +1047,27 @@ export const dashboard = new Hono()
         morosos: FUNDO_RESERVA_DEVEDORES_EXCEL,
       },
       incendio: {
-        // Obra paga ao empreiteiro com dinheiro da conta geral
-        // Saldo da conta = 0 (obra liquidada)
-        // A receber = valor que G/AC/AD ainda não pagaram (dinâmico via DB > Excel fallback)
+        // Fonte: col O Excel — total real 110.12€ (G: 60.72 + AD: 49.40)
+        // Dinâmico: Excel base − quem pagou na DB (via quotaTipoId INCENDIO)
         saldoConta: saldos.saldo_incendio,
         aReceber: incendioAReceberDinamico,
+        fracoesEmAtraso: incendioMorososDinamico.length,
         morosos: incendioMorososDinamico,
       },
       quotaExtra: {
+        // Fonte: col R Excel — Indaqua + Elevadores — total real 308.21€
+        // Dinâmico: INDAQUA_DEVEDORES_EXCEL − quem pagou na DB
         saldoConta: saldos.saldo_quota_extra,
-        // Recalcular a_receber a partir dos morosos dinâmicos (DB remove quem pagou)
         aReceber: quotaExtraMorososDinamico.length > 0 ? quotaExtraAReceberDinamico : saldos.a_receber_quota_extra,
+        fracoesEmAtraso: quotaExtraMorososDinamico.length,
         morosos: quotaExtraMorososDinamico,
+      },
+      motor: {
+        // Fonte: col U Excel — Quota extra motor — total real 98.48€
+        // Dinâmico: lê fracoes.motor_divida > 0 directamente da BD (sempre actualizado pelo seed)
+        aReceber: motorAReceberDinamico,
+        fracoesEmAtraso: motorMorososDinamico.length,
+        morosos: motorMorososDinamico,
       },
       portaoGaragem: {
         saldoConta: saldos.saldo_portao,

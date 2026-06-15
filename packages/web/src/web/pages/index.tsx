@@ -12,7 +12,7 @@ import {
   Euro, Building2, RefreshCw, Zap, ChevronRight,
   Flame, Droplets, Wrench, ArrowLeft, Clock, Wallet,
   ArrowDownCircle, ArrowUpCircle, PiggyBank, DoorOpen,
-  ChevronDown, ChevronUp, Lock, Unlock
+  ChevronDown, ChevronUp, Lock, Unlock, Cog
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -138,6 +138,7 @@ export default function DashboardPage() {
   if (secao === "incendio") return <>{syncBannerEl}<SecaoIncendio data={d} onBack={() => setSecao("overview")} /></>;
   if (secao === "quotaExtra") return <>{syncBannerEl}<SecaoQuotaExtra data={d} onBack={() => setSecao("overview")} /></>;
   if (secao === "portaoGaragem") return <>{syncBannerEl}<SecaoPortaoGaragem data={d} onBack={() => setSecao("overview")} /></>;
+  if (secao === "motor") return <>{syncBannerEl}<SecaoMotor data={d} onBack={() => setSecao("overview")} /></>;
   if (secao === "fundoReserva") return <>{syncBannerEl}<SecaoFundoReserva data={d} onBack={() => setSecao("overview")} /></>;
   const extraSel = d.extras?.find((e: any) => e.tipo.id === secao);
   if (extraSel) return <>{syncBannerEl}<SecaoExtra extra={extraSel} incendioData={d.incendio} onBack={() => setSecao("overview")} /></>;
@@ -488,6 +489,18 @@ function Overview({ d, setSecao, onRefresh }: any) {
               icon={<DoorOpen size={20} />}
               onClick={() => setSecao("portaoGaragem")}
             />
+            {/* Motor Garagem */}
+            <ContaCard
+              titulo="Motor Garagem"
+              banco="Quota extra"
+              saldo={0}
+              saldoLabel="sem conta dedicada"
+              aReceber={d.motor?.aReceber ?? 0}
+              aReceberLabel={`${d.motor?.fracoesEmAtraso ?? 0} frações em dívida`}
+              color="slate"
+              icon={<Cog size={20} />}
+              onClick={() => setSecao("motor")}
+            />
             {/* Incêndio */}
             <ContaCard
               titulo="Incendio"
@@ -495,7 +508,7 @@ function Overview({ d, setSecao, onRefresh }: any) {
               saldo={d.incendio?.saldoConta ?? 0}
               saldoLabel="Obra paga"
               aReceber={d.incendio?.aReceber ?? 0}
-              aReceberLabel="por receber (G/AC/AD)"
+              aReceberLabel={`${d.incendio?.fracoesEmAtraso ?? 0} frações por receber`}
               color="red"
               icon={<Flame size={20} />}
               onClick={() => setSecao("incendio")}
@@ -590,7 +603,7 @@ function ContaCard({
   titulo: string; banco: string;
   saldo: number; saldoLabel?: string;
   aReceber: number; aReceberLabel: string;
-  color: "blue" | "amber" | "green" | "red" | "purple" | "orange";
+  color: "blue" | "amber" | "green" | "red" | "purple" | "orange" | "slate";
   icon: React.ReactNode; onClick?: () => void; semDetalhe?: boolean;
 }) {
   const palette = {
@@ -600,6 +613,7 @@ function ContaCard({
     red:    { bg: "var(--red-subtle)",    fg: "var(--red)",           pill: "rgba(239,68,68,0.12)"  },
     purple: { bg: "var(--purple-subtle)", fg: "var(--purple)",        pill: "rgba(168,85,247,0.12)" },
     orange: { bg: "rgba(249,115,22,0.1)", fg: "rgb(249,115,22)",      pill: "rgba(249,115,22,0.12)" },
+    slate:  { bg: "rgba(100,116,139,0.1)", fg: "rgb(100,116,139)",   pill: "rgba(100,116,139,0.12)" },
   }[color];
 
   return (
@@ -888,6 +902,40 @@ function SecaoPortaoGaragem({ data: d, onBack }: any) {
         </div>
         <p className="text-xs" style={{ color: "var(--text-muted)" }}>
           Kit motor seccionado marca Sommer — fornecimento e montagem. Vencimento: 28-05-2026.
+        </p>
+        {morosos.length === 0 ? (
+          <Card><CardContent className="flex flex-col items-center justify-center py-16 gap-3">
+            <CheckCircle2 size={40} style={{ color: "var(--green)" }} />
+            <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>Todas as frações liquidaram!</p>
+          </CardContent></Card>
+        ) : (
+          <div className="space-y-3">{morosos.map((m: any) => <MorososCard key={m.fracao.id} m={m} />)}</div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ══════════════════════════════════════════════
+// SECÇÃO: MOTOR GARAGEM
+// ══════════════════════════════════════════════
+function SecaoMotor({ data: d, onBack }: any) {
+  const motor = d.motor ?? {};
+  const morosos = motor.morosos ?? [];
+  return (
+    <>
+      <PageHeader
+        title="Motor da Garagem"
+        subtitle={`Quota extra motor · ${morosos.length} frações em dívida`}
+        actions={<Button variant="secondary" size="sm" onClick={onBack}><ArrowLeft size={13} /> Voltar</Button>}
+      />
+      <div className="p-6 space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          <KpiCard label="Por receber" value={formatEuro(motor.aReceber ?? 0)} sub={`${morosos.length} frações`} icon={<AlertCircle size={16} />} iconColor="var(--red)" />
+          <KpiCard label="Frações em dívida" value={String(morosos.length)} sub="col U do Excel" icon={<Cog size={16} />} iconColor="rgb(100,116,139)" />
+        </div>
+        <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+          Quota extra motor garagem — fonte: Excel col U. Total em dívida: {formatEuro(motor.aReceber ?? 0)}.
         </p>
         {morosos.length === 0 ? (
           <Card><CardContent className="flex flex-col items-center justify-center py-16 gap-3">
