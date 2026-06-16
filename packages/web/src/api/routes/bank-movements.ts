@@ -1,21 +1,25 @@
 /**
  * Bank Movements Route — /api/bank-movements
  * Fonte única: tabela bank_transactions (Enable Banking via Turso).
- * CSV histórico removido da interface principal.
  *
- * PATCH /:id/classificacao — após gravar importType, repõe imported=0 e dispara
- * processarStagedTransactions() que corre:
- *   1. Motor matricial (identifyByMultiMatch)
- *   2. Cascata de amortização (processarCascataAmortizacao)
- *   3. recalcularSaldos() → atualiza dashboard + dívidas por fração
+ * PATCH /:id/classificacao — classificação MANUAL pelo utilizador:
+ *   1. Grava importType + status="booked" + imported=1 (fora do staging buffer)
+ *   2. Se for quota (qualquer tipo), tenta criar/actualizar quota na tabela quotas
+ *      para a fração inferida do debtorName/description — sem depender do motor
+ *   3. Chama recalcularSaldos() directamente → dashboard actualizado imediatamente
+ *
+ * Não usa processarStagedTransactions() pois esse motor filtra imported=0 e
+ * requer score >= 55 de identifyByMultiMatch para criar a quota. Quando o
+ * utilizador classifica manualmente, já temos a intenção explícita — o motor
+ * é irrelevante e seria um ponto de falha silenciosa.
  */
 
 import { Hono } from "hono";
 import { requireAdmin } from "../middleware/auth";
 import { db } from "../database";
-import { bankTransactions } from "../database/schema";
-import { eq, desc } from "drizzle-orm";
-import { processarStagedTransactions } from "./bank";
+import * as schema from "../database/schema";
+import { bankTransactions, quotas, fracoes } from "../database/schema";
+import { eq, desc, and } from "drizzle-orm";
 import { recalcularSaldos } from "./dashboard";
 
 // Classificações mapeadas ao domínio real do condomínio
@@ -135,16 +139,22 @@ export const bankMovementsRoutes = new Hono()
     }
   })
 
-  // PATCH /api/bank-movements/:id/classificacao — gravar classificação manual
-  // GATILHO EM CASCATA:
-  //   1. Grava importType + repõe imported=0 (força reprocessamento)
-  //   2. processarStagedTransactions() → motor matricial + cascata amortização
-  //   3. recalcularSaldos() já é invocado dentro de processarStagedTransactions()
-  //      → dashboard + dívidas por fração ficam sincronizados imediatamente
+  // PATCH /api/bank-movements/:id/classificacao — classificação MANUAL
+  //
+  // Bypass completo ao motor automático (processarStagedTransactions).
+  // Fluxo:
+  //   1. Lê a TXN para obter amount, date, debtorName
+  //   2. Grava importType + status="booked" + imported=1 (sai do staging buffer)
+  //      → com imported=1 a TXN deixa de ser contada como "cativo" em calcularValoresCativos()
+  //   3. Se a classificação é uma quota (não "despesa"), mapeia para o tipo DB
+  //      e tenta criar/actualizar a quota na tabela quotas usando a fração
+  //      inferida do debtorName (ex: "L" → fracaoId real)
+  //      → com a quota pago=true, recalcularSaldos() soma o valor ao saldo_conta_corrente
+  //   4. Chama recalcularSaldos() directamente — sem depender do motor
   .patch("/:id/classificacao", requireAdmin, async (c) => {
     try {
       const id = c.req.param("id");
-      const body = await c.req.json<{ classificacao: string }>();
+      const body = await c.req.json<{ classificacao: string; fracaoId?: string }>();
       const classificacao = body.classificacao as Classification;
 
       if (!VALID_CLASSIFICATIONS.includes(classificacao)) {
@@ -154,46 +164,150 @@ export const bankMovementsRoutes = new Hono()
         }, 400);
       }
 
-      // ── Passo 1: Gravar nova classificação + repor imported=0 ──────────────
-      // Repor imported=0 força processarStagedTransactions() a reprocessar esta TXN.
-      // requiresManualReview=0 para que não seja ignorada pelo motor.
-      // status → "booked" obrigatório: o motor de amortização ignora "pending".
-      // imported=0 força reprocessamento; requiresManualReview=0 remove bloqueio.
+      // ── Passo 1: Ler TXN ──────────────────────────────────────────────────
+      const [txn] = await db
+        .select()
+        .from(bankTransactions)
+        .where(eq(bankTransactions.id, id))
+        .limit(1);
+
+      if (!txn) {
+        return c.json({ ok: false, error: "Transação não encontrada" }, 404);
+      }
+
+      // ── Passo 2: Gravar classificação — imported=1, status=booked ─────────
+      // imported=1 → TXN sai do staging buffer:
+      //   • calcularValoresCativos() filtra imported=0, logo o montante deixa
+      //     de ser contado como "cativo" (dinheiro congelado sem destino)
+      //   • O dashboard pára de subtrair este valor do saldo_operacional_disponivel
+      // status="booked" → confirmação de que é dinheiro real liquidado
       await db
         .update(bankTransactions)
         .set({
           importType: classificacao,
-          imported: 0,
-          requiresManualReview: 0,
           status: "booked",
+          imported: 1,
+          requiresManualReview: 0,
         })
         .where(eq(bankTransactions.id, id));
 
-      // ── Passo 2: Motor em cascata ──────────────────────────────────────────
-      // processarStagedTransactions() processa TODAS as TXNs com imported=0.
-      // Inclui a que acabámos de repor. O motor vai:
-      //   a) Confirmar a fração via identifyByMultiMatch
-      //   b) Criar/atualizar a quota correspondente (tipo = classificacao)
-      //   c) Aplicar processarCascataAmortizacao → abater dívidas em atraso
-      //   d) Chamar recalcularSaldos() → dashboard + morosidade atualizados
-      const engineResult = await processarStagedTransactions();
+      // ── Passo 3: Mapear classificação → tipo quota + criar/actualizar quota ─
+      // Mapa importType → tipo na tabela quotas
+      // "quota"          → "condominio"  (conta corrente principal)
+      // "quota_obras"    → "obras"       (gaveta obras)
+      // "quota_incendio" → "extra"       (seguro incêndio — tipo extra)
+      // "quota_motor"    → "extra"       (portão motor — tipo extra)
+      // "despesa"        → null (não gera quota)
+      const QUOTA_TIPO_MAP: Record<Classification, string | null> = {
+        quota:          "condominio",
+        quota_obras:    "obras",
+        quota_incendio: "extra",
+        quota_motor:    "extra",
+        despesa:        null,
+      };
+      const quotaTipo = QUOTA_TIPO_MAP[classificacao];
 
-      // Fallback: se a TXN ficou em manual_review (motor não identificou fração),
-      // pelo menos recalcular saldos para reflectir a mudança de categoria.
-      const manualReviewCount = engineResult.manualReview;
-      if (manualReviewCount > 0) {
-        await recalcularSaldos();
+      let quotaCriada = false;
+      let quotaId: string | null = null;
+
+      if (quotaTipo !== null) {
+        // Inferir fração: prioritizar fracaoId do body, depois debtorName, depois creditorName
+        const fracaoNumero = (
+          body.fracaoId
+          ?? txn.debtorName?.trim()
+          ?? txn.creditorName?.trim()
+        )?.toUpperCase();
+
+        if (fracaoNumero) {
+          // Procurar fração na DB (match por numero)
+          const allFracoes = await db
+            .select({ id: fracoes.id, numero: fracoes.numero })
+            .from(fracoes);
+
+          // Tentar match directo ou como prefixo (ex: "L " → "L")
+          const fracaoMatch = allFracoes.find(f =>
+            f.numero.toUpperCase() === fracaoNumero ||
+            fracaoNumero.startsWith(f.numero.toUpperCase() + " ")
+          );
+
+          if (fracaoMatch) {
+            const txDate = txn.date instanceof Date
+              ? txn.date
+              : new Date((txn.date as unknown as number) * 1000);
+            const mes = txDate.getMonth() + 1;
+            const ano = txDate.getFullYear();
+            const valor = Math.abs(txn.amount ?? 0);
+
+            // Dedup: quota já existe para esta fração/mês/ano/tipo?
+            const existing = await db
+              .select({ id: quotas.id })
+              .from(quotas)
+              .where(and(
+                eq(quotas.fracaoId, fracaoMatch.id),
+                eq(quotas.mes, mes),
+                eq(quotas.ano, ano),
+                eq(quotas.tipo, quotaTipo),
+              ))
+              .limit(1);
+
+            if (existing.length > 0) {
+              // Actualizar para pago=true
+              await db
+                .update(quotas)
+                .set({
+                  pago: true,
+                  valor,
+                  dataPagamento: txDate,
+                  metodoPagamento: "transferência",
+                  observacoes: `[manual:${classificacao}] id:${id}`,
+                })
+                .where(eq(quotas.id, existing[0].id));
+              quotaId = existing[0].id;
+            } else {
+              // Criar nova quota paga
+              const inserted = await db
+                .insert(quotas)
+                .values({
+                  fracaoId: fracaoMatch.id,
+                  tipo: quotaTipo,
+                  mes,
+                  ano,
+                  valor,
+                  fundoReserva: parseFloat((valor * 0.1).toFixed(2)),
+                  pago: true,
+                  dataPagamento: txDate,
+                  metodoPagamento: "transferência",
+                  observacoes: `[manual:${classificacao}] id:${id}`,
+                })
+                .returning({ id: quotas.id });
+              quotaId = inserted[0].id;
+            }
+
+            // Ligar a quota à TXN
+            if (quotaId) {
+              await db
+                .update(bankTransactions)
+                .set({ importRefId: quotaId })
+                .where(eq(bankTransactions.id, id));
+              quotaCriada = true;
+            }
+          }
+        }
       }
+
+      // ── Passo 4: Recalcular saldos do dashboard ────────────────────────────
+      // Invocação directa — sem depender do motor.
+      // recalcularSaldos() vai agora:
+      //   • NÃO contar a TXN como cativo (imported=1)
+      //   • Se quota foi criada: somar q.valor ao saldo_conta_corrente (pago=true)
+      await recalcularSaldos();
 
       return c.json({
         ok: true,
         id,
         importType: classificacao,
-        engine: {
-          processed:    engineResult.processed,
-          manualReview: engineResult.manualReview,
-          errors:       engineResult.errors,
-        },
+        quotaCriada,
+        quotaId,
       });
     } catch (e: any) {
       return c.json({ ok: false, error: e.message }, 500);
