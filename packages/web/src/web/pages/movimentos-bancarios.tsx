@@ -1,25 +1,22 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getToken } from "../lib/auth";
 import { PageHeader } from "../components/Layout";
 import { formatEuro } from "../lib/utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Movement {
-  seq: number;
+  id: string;
   dataOperacao: string;
-  mes: string;
-  ano: string;
-  tipo: string;
   descritivo: string;
   montante: number;
-  saldo: number;
+  tipo: "Entrada" | "Saída";
   categoria: string;
-  subCategoria: string;
-  categoriaSource: "csv" | "auto" | "unmatched";
+  categoriaSource: "auto" | "unmatched";
   nomeIdentificado?: string;
-  fracaoIdentificada?: string | null;
   notaCategorizacao?: string;
+  status: string;
+  requiresReview: boolean;
 }
 
 interface Stats {
@@ -30,19 +27,7 @@ interface Stats {
   saldoFinal: number;
   categorizados: number;
   naoCategorizado: number;
-  despesasBancarias: number;
-  porFracao: Record<string, { count: number; total: number }>;
   porCategoria: Record<string, { count: number; total: number }>;
-}
-
-interface FracaoResumo {
-  fracao: string;
-  nome: string;
-  tipo: string;
-  permilage: number;
-  totalPago: number;
-  numPagamentos: number;
-  identificadoNoBanco: boolean;
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
@@ -53,24 +38,25 @@ function authHeaders(): Record<string, string> {
 
 async function apiFetch<T>(path: string): Promise<T> {
   const r = await fetch(path, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
-function CatBadge({ source, cat }: { source: string; cat: string }) {
-  const color =
-    source === "csv"   ? "bg-blue-100 text-blue-700" :
-    source === "auto"  ? "bg-green-100 text-green-700" :
-    "bg-red-100 text-red-700";
-  return (
-    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${color}`}>
-      {cat || "—"}
-    </span>
-  );
+async function patchClassificacao(id: string, classificacao: string): Promise<void> {
+  const r = await fetch(`/api/bank-movements/${id}/classificacao`, {
+    method: "PATCH",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ classificacao }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error((err as any).error ?? `HTTP ${r.status}`);
+  }
 }
 
+// ─── Sub-components ───────────────────────────────────────────────────────────
 function KpiCard({ label, value, sub, color = "text-gray-900" }: {
-  label: string; value: string; sub?: string; color?: string
+  label: string; value: string; sub?: string; color?: string;
 }) {
   return (
     <div className="bg-white rounded-xl border p-4">
@@ -81,77 +67,118 @@ function KpiCard({ label, value, sub, color = "text-gray-900" }: {
   );
 }
 
+const CLASSIFICACOES = [
+  { value: "quota",   label: "Quota Condomínio" },
+  { value: "obras",   label: "Obras / Fundo" },
+  { value: "despesa", label: "Despesa" },
+  { value: "cativo",  label: "Cativo" },
+  { value: "outro",   label: "Outro" },
+];
+
+function ClassDropdown({ id, current, onSave }: {
+  id: string;
+  current: string;
+  onSave: (id: string, val: string) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+
+  async function handleChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    setSaving(true);
+    try {
+      await onSave(id, e.target.value);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Normalizar valor actual para o enum
+  const normalised = CLASSIFICACOES.find(c => c.value === current)?.value ?? "";
+
+  return (
+    <select
+      value={normalised}
+      onChange={handleChange}
+      disabled={saving}
+      className={`text-xs border rounded px-2 py-1 bg-white transition-opacity ${saving ? "opacity-50" : ""}`}
+    >
+      <option value="">— Não classificado —</option>
+      {CLASSIFICACOES.map(c => (
+        <option key={c.value} value={c.value}>{c.label}</option>
+      ))}
+    </select>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function MovimentosBancariosPage() {
-  const [tab, setTab] = useState<"overview" | "movimentos" | "fracoes" | "categorias" | "reconciliacao">("overview");
-  const [filterCat, setFilterCat]       = useState("");
-  const [filterFracao, setFilterFracao] = useState("");
-  const [filterTipo, setFilterTipo]     = useState("");
-  const [filterSource, setFilterSource] = useState("");
-  const [page, setPage] = useState(1);
+  const qc = useQueryClient();
+  const [tab, setTab] = useState<"overview" | "movimentos" | "categorias" | "reconciliacao">("overview");
+  const [filterCat, setFilterCat]   = useState("");
+  const [filterTipo, setFilterTipo] = useState("");
+  const [page, setPage]             = useState(1);
 
-  // Overview data
-  const { data: overview } = useQuery({
-    queryKey: ["bank-movements-overview"],
+  // ── Overview (stats gerais) ──
+  const { data: overview, isLoading: overviewLoading } = useQuery({
+    queryKey: ["bm-overview"],
     queryFn: () => apiFetch<any>("/api/bank-movements?force=1"),
     staleTime: 60_000,
   });
 
-  const { data: fracoesData } = useQuery({
-    queryKey: ["bank-movements-fracoes"],
-    queryFn: () => apiFetch<any>("/api/bank-movements/resumo-fracoes"),
-    staleTime: 60_000,
-  });
-
+  // ── Categorias ──
   const { data: catData } = useQuery({
-    queryKey: ["bank-movements-cats"],
+    queryKey: ["bm-categorias"],
     queryFn: () => apiFetch<any>("/api/bank-movements/categorias"),
     staleTime: 60_000,
   });
 
+  // ── Reconciliação ──
   const { data: reconcData } = useQuery({
-    queryKey: ["bank-movements-reconciliacao"],
+    queryKey: ["bm-reconciliacao"],
     queryFn: () => apiFetch<any>("/api/bank-movements/reconciliacao"),
     staleTime: 60_000,
     enabled: tab === "reconciliacao",
   });
 
-  const stats: Stats | null = overview?.condominio?.estatisticas ?? null;
-  const csvDisponivel: boolean = overview === undefined ? true : (overview?.csvDisponivel ?? false);
-  const fracoes: FracaoResumo[] = fracoesData?.resumo ?? [];
-  const categorias: { categoria: string; count: number; total: number }[] = catData?.categorias ?? [];
-
-  // Movimentos — dentro do React Query para responder a invalidateQueries()
+  // ── Lista movimentos ──
   const { data: movData, isLoading: movLoading } = useQuery({
-    queryKey: ["bank-movements-lista", page, filterCat, filterFracao, filterTipo, filterSource],
+    queryKey: ["bm-lista", page, filterCat, filterTipo],
     queryFn: async () => {
       const params = new URLSearchParams({ page: String(page), pageSize: "50" });
-      if (filterCat)    params.set("categoria", filterCat);
-      if (filterFracao) params.set("fracao", filterFracao);
-      if (filterTipo)   params.set("tipo", filterTipo);
-      if (filterSource) params.set("source", filterSource);
+      if (filterCat)  params.set("categoria", filterCat);
+      if (filterTipo) params.set("tipo", filterTipo);
       return apiFetch<any>(`/api/bank-movements/condominio?${params}`);
     },
     enabled: tab === "movimentos",
     staleTime: 30_000,
   });
 
+  // ── Mutation: gravar classificação ──
+  const classifyMutation = useMutation({
+    mutationFn: ({ id, val }: { id: string; val: string }) => patchClassificacao(id, val),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["bm-lista"] });
+      qc.invalidateQueries({ queryKey: ["bm-overview"] });
+      qc.invalidateQueries({ queryKey: ["bm-categorias"] });
+    },
+  });
+
+  const stats: Stats | null = overview?.condominio?.estatisticas ?? null;
   const movimentos: Movement[] = movData?.movimentos ?? [];
-  const totalMov: number = movData?.total ?? 0;
+  const totalMov: number       = movData?.total ?? 0;
+  const categorias: { categoria: string; count: number; total: number }[] = catData?.categorias ?? [];
 
   const TABS = [
-    { id: "overview",       label: "Resumo" },
-    { id: "movimentos",     label: "Movimentos" },
-    { id: "fracoes",        label: "Por Fração" },
-    { id: "categorias",     label: "Categorias" },
-    { id: "reconciliacao",  label: "Reconciliação" },
+    { id: "overview",      label: "Resumo" },
+    { id: "movimentos",    label: "Movimentos" },
+    { id: "categorias",    label: "Categorias" },
+    { id: "reconciliacao", label: "Reconciliação" },
   ] as const;
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <PageHeader
         title="Movimentos Bancários"
-        subtitle="Extracto Santander auto-categorizado — conta condomínio (2023–2026)"
+        subtitle="Transacções Enable Banking — conta condomínio"
       />
 
       {/* Tabs */}
@@ -174,28 +201,20 @@ export default function MovimentosBancariosPage() {
       {/* ── OVERVIEW ── */}
       {tab === "overview" && (
         <div className="space-y-6">
-          {!stats ? (
-            !csvDisponivel ? (
-              /* CSV não encontrado no servidor */
-              <div className="flex flex-col items-center justify-center py-24 gap-4">
-                <div className="w-16 h-16 rounded-full bg-amber-100 flex items-center justify-center text-3xl">📂</div>
-                <div className="text-center max-w-md">
-                  <p className="text-lg font-semibold text-gray-800 mb-2">Extracto bancário não encontrado</p>
-                  <p className="text-sm text-gray-500 mb-1">
-                    O servidor não encontrou nenhum ficheiro CSV de extracto bancário nos caminhos configurados.
-                  </p>
-                  <p className="text-xs text-gray-400 font-mono mt-3">
-                    Esperados em: <code>/tmp/bank_pdfs/</code>
-                  </p>
-                  <p className="text-xs text-gray-400 mt-1">
-                    Importa o extracto via <strong>Importar Dados</strong> ou coloca o CSV manualmente no servidor.
-                  </p>
-                </div>
+          {overviewLoading ? (
+            <div className="text-center py-20 text-gray-500">A carregar dados...</div>
+          ) : !stats ? (
+            /* DB vazia — sem transacções Enable Banking */
+            <div className="flex flex-col items-center justify-center py-24 gap-4">
+              <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center text-3xl">🏦</div>
+              <div className="text-center max-w-md">
+                <p className="text-lg font-semibold text-gray-800 mb-2">Sem movimentos bancários registados</p>
+                <p className="text-sm text-gray-500">
+                  Ainda não existem transacções sincronizadas via Enable Banking.
+                  Liga a conta bancária em <strong>Definições → Enable Banking</strong> para iniciar a sincronização.
+                </p>
               </div>
-            ) : (
-              /* Ainda a carregar */
-              <div className="text-center py-20 text-gray-500">A processar extracto bancário...</div>
-            )
+            </div>
           ) : (
             <>
               {/* KPIs */}
@@ -203,86 +222,63 @@ export default function MovimentosBancariosPage() {
                 <KpiCard
                   label="Saldo actual"
                   value={formatEuro(stats.saldoFinal)}
-                  sub="conta corrente"
+                  sub="entradas − saídas"
                 />
                 <KpiCard
                   label="Total entradas"
                   value={formatEuro(stats.totalEntradas)}
-                  sub={`${stats.entradas} movimentos`}
+                  sub={`${stats.entradas} transacções`}
                   color="text-green-700"
                 />
                 <KpiCard
                   label="Total saídas"
                   value={formatEuro(stats.totalSaidas)}
-                  sub={`${stats.saidas} movimentos`}
+                  sub={`${stats.saidas} transacções`}
                   color="text-red-700"
                 />
                 <KpiCard
-                  label="Categorizados"
+                  label="Classificadas"
                   value={`${stats.categorizados}/${stats.entradas + stats.saidas}`}
-                  sub={stats.naoCategorizado === 0 ? "✓ 100% identificados" : `${stats.naoCategorizado} por identificar`}
+                  sub={stats.naoCategorizado === 0
+                    ? "✓ 100% classificadas"
+                    : `${stats.naoCategorizado} por classificar`}
                   color="text-blue-700"
                 />
               </div>
 
-              {/* Categorisation status */}
-              <div className="bg-white rounded-xl border p-5">
-                <h3 className="font-semibold text-gray-900 mb-3">Estado da Categorização Automática</h3>
-                <div className="flex gap-6 flex-wrap mb-3">
-                  <div className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full bg-blue-500 inline-block"/>
-                    <span className="text-sm text-gray-700">Do CSV original ({stats.categorizados - Object.values(stats.porFracao).reduce((s, v) => s + v.count, 0)} mov.)</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full bg-green-500 inline-block"/>
-                    <span className="text-sm text-gray-700">Auto-identificados pelo motor</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full bg-gray-300 inline-block"/>
-                    <span className="text-sm text-gray-700">{stats.despesasBancarias} encargos bancários (comissões/imp.selo)</span>
-                  </div>
+              {/* Estado classificação */}
+              {stats.naoCategorizado > 0 && (
+                <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
+                  ⚠ <strong>{stats.naoCategorizado}</strong> transacções aguardam classificação manual — abre o separador <strong>Movimentos</strong> para as classificar.
                 </div>
-                {stats.naoCategorizado === 0 ? (
-                  <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
-                    ✓ Todos os {stats.entradas + stats.saidas} movimentos foram categorizados com sucesso (2023–Jan 2026).
-                  </div>
-                ) : (
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
-                    ⚠ {stats.naoCategorizado} movimentos ainda não identificados — ver tab "Movimentos" com filtro "Não identificado".
-                  </div>
-                )}
-              </div>
+              )}
 
-              {/* Top frações */}
-              <div className="bg-white rounded-xl border p-5">
-                <h3 className="font-semibold text-gray-900 mb-4">Pagamentos identificados por Fração</h3>
-                <div className="space-y-2">
-                  {Object.entries(stats.porFracao)
-                    .sort(([, a], [, b]) => b.total - a.total)
-                    .map(([fr, v]) => {
-                      const maxTotal = Math.max(...Object.values(stats.porFracao).map(x => x.total));
-                      return (
-                        <div key={fr} className="flex items-center gap-3">
-                          <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded w-10 text-center shrink-0">{fr}</span>
-                          <div className="flex-1 bg-gray-100 rounded-full h-2">
-                            <div
-                              className="bg-blue-500 h-2 rounded-full transition-all"
-                              style={{ width: `${(v.total / maxTotal) * 100}%` }}
-                            />
+              {/* Top categorias */}
+              {Object.keys(stats.porCategoria).length > 0 && (
+                <div className="bg-white rounded-xl border p-5">
+                  <h3 className="font-semibold text-gray-900 mb-4">Distribuição por Categoria</h3>
+                  <div className="space-y-2">
+                    {Object.entries(stats.porCategoria)
+                      .sort(([, a], [, b]) => b.total - a.total)
+                      .map(([cat, v]) => {
+                        const maxTotal = Math.max(...Object.values(stats.porCategoria).map(x => x.total));
+                        return (
+                          <div key={cat} className="flex items-center gap-3">
+                            <span className="text-sm text-gray-700 w-44 truncate shrink-0" title={cat}>{cat}</span>
+                            <div className="flex-1 bg-gray-100 rounded-full h-2">
+                              <div
+                                className="bg-blue-500 h-2 rounded-full transition-all"
+                                style={{ width: `${(v.total / maxTotal) * 100}%` }}
+                              />
+                            </div>
+                            <span className="text-sm font-medium w-28 text-right">{formatEuro(v.total)}</span>
+                            <span className="text-xs text-gray-500 w-16 text-right">{v.count} mov.</span>
                           </div>
-                          <span className="text-sm font-medium w-28 text-right">{formatEuro(v.total)}</span>
-                          <span className="text-xs text-gray-500 w-16 text-right">{v.count} pag.</span>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                  </div>
                 </div>
-              </div>
-
-              {/* Note on cut-off */}
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
-                <strong>Nota:</strong> O extracto CSV cobre os movimentos até 30 Janeiro 2026. Pagamentos posteriores (Fev–Mai 2026) 
-                constam de outros documentos (capturas de ecrã partilhadas) mas não estão neste ficheiro.
-              </div>
+              )}
             </>
           )}
         </div>
@@ -291,7 +287,7 @@ export default function MovimentosBancariosPage() {
       {/* ── MOVIMENTOS ── */}
       {tab === "movimentos" && (
         <div className="space-y-4">
-          {/* Filters */}
+          {/* Filtros */}
           <div className="bg-white rounded-xl border p-4 flex flex-wrap gap-3 items-center">
             <select
               value={filterTipo}
@@ -303,16 +299,6 @@ export default function MovimentosBancariosPage() {
               <option value="Saída">Saídas</option>
             </select>
             <select
-              value={filterSource}
-              onChange={e => { setFilterSource(e.target.value); setPage(1); }}
-              className="text-sm border rounded-lg px-3 py-2 bg-white"
-            >
-              <option value="">Fonte: Todas</option>
-              <option value="csv">Do CSV original</option>
-              <option value="auto">Auto-categorizado</option>
-              <option value="unmatched">Não identificado</option>
-            </select>
-            <select
               value={filterCat}
               onChange={e => { setFilterCat(e.target.value); setPage(1); }}
               className="text-sm border rounded-lg px-3 py-2 bg-white"
@@ -322,15 +308,8 @@ export default function MovimentosBancariosPage() {
                 <option key={c.categoria} value={c.categoria}>{c.categoria}</option>
               ))}
             </select>
-            <input
-              type="text"
-              value={filterFracao}
-              onChange={e => { setFilterFracao(e.target.value.toUpperCase()); setPage(1); }}
-              placeholder="Fração (ex: L)"
-              className="text-sm border rounded-lg px-3 py-2 w-32"
-            />
             <button
-              onClick={() => { setFilterTipo(""); setFilterSource(""); setFilterCat(""); setFilterFracao(""); setPage(1); }}
+              onClick={() => { setFilterTipo(""); setFilterCat(""); setPage(1); }}
               className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2 border rounded-lg"
             >
               Limpar filtros
@@ -340,6 +319,11 @@ export default function MovimentosBancariosPage() {
 
           {movLoading ? (
             <div className="text-center py-10 text-gray-500">A carregar...</div>
+          ) : movimentos.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-3">
+              <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-2xl">🏦</div>
+              <p className="text-gray-500 text-sm">Sem movimentos bancários registados pelo Enable Banking.</p>
+            </div>
           ) : (
             <div className="bg-white rounded-xl border overflow-hidden">
               <div className="overflow-x-auto">
@@ -348,39 +332,35 @@ export default function MovimentosBancariosPage() {
                     <tr>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Data</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Descritivo</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Categoria</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Fração</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Classificação</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Montante</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {movimentos.map((m, i) => (
-                      <tr key={i} className="hover:bg-gray-50 transition-colors">
+                    {movimentos.map((m) => (
+                      <tr key={m.id} className={`hover:bg-gray-50 transition-colors ${m.requiresReview ? "bg-amber-50/40" : ""}`}>
                         <td className="px-4 py-3 text-gray-600 whitespace-nowrap font-mono text-xs">
                           {m.dataOperacao}
                         </td>
                         <td className="px-4 py-3 max-w-xs">
                           <div className="text-gray-900 truncate" title={m.descritivo}>{m.descritivo}</div>
-                          {m.notaCategorizacao && (
+                          {m.notaCategorizacao && m.notaCategorizacao !== m.descritivo && (
                             <div className="text-xs text-gray-400 mt-0.5 truncate" title={m.notaCategorizacao}>
                               {m.notaCategorizacao}
                             </div>
                           )}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">
-                          <CatBadge source={m.categoriaSource} cat={m.categoria} />
-                        </td>
-                        <td className="px-4 py-3">
-                          {m.subCategoria ? (
-                            <span className="text-xs font-mono bg-blue-50 text-blue-700 px-2 py-0.5 rounded font-bold">
-                              {m.subCategoria}
-                            </span>
-                          ) : "—"}
+                          <ClassDropdown
+                            id={m.id}
+                            current={m.categoria}
+                            onSave={(id, val) => classifyMutation.mutate({ id, val })}
+                          />
                         </td>
                         <td className={`px-4 py-3 text-right font-mono font-medium whitespace-nowrap ${
-                          m.montante > 0 ? "text-green-700" : "text-red-700"
+                          m.montante >= 0 ? "text-green-700" : "text-red-700"
                         }`}>
-                          {m.montante > 0 ? "+" : ""}{formatEuro(Math.abs(m.montante))}
+                          {m.montante >= 0 ? "+" : ""}{formatEuro(Math.abs(m.montante))}
                         </td>
                       </tr>
                     ))}
@@ -388,7 +368,7 @@ export default function MovimentosBancariosPage() {
                 </table>
               </div>
 
-              {/* Pagination */}
+              {/* Paginação */}
               <div className="px-4 py-3 border-t flex items-center justify-between">
                 <button
                   disabled={page <= 1}
@@ -398,7 +378,7 @@ export default function MovimentosBancariosPage() {
                   ← Anterior
                 </button>
                 <span className="text-sm text-gray-500">
-                  Página {page} de {Math.ceil(totalMov / 50)} ({totalMov} total)
+                  Página {page} de {Math.ceil(totalMov / 50) || 1} ({totalMov} total)
                 </span>
                 <button
                   disabled={page * 50 >= totalMov}
@@ -413,99 +393,35 @@ export default function MovimentosBancariosPage() {
         </div>
       )}
 
-      {/* ── POR FRAÇÃO ── */}
-      {tab === "fracoes" && (
-        <div className="space-y-4">
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-800">
-            <strong>Nota:</strong> Os pagamentos mostrados provêm exclusivamente do extracto bancário CSV (2023–Jan 2026).
-            Frações com "Sem pagamentos" podem ter pago por débito direto, referência MB, ou após Jan 2026.
-          </div>
-          <div className="bg-white rounded-xl border overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b">
-                  <tr>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">FR</th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Proprietário</th>
-                    <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Tipo</th>
-                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">‰</th>
-                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Pag.</th>
-                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Total Pago</th>
-                    <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Estado</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {fracoes.map(fr => (
-                    <tr key={fr.fracao} className={`hover:bg-gray-50 ${!fr.identificadoNoBanco ? "bg-amber-50/50" : ""}`}>
-                      <td className="px-4 py-3">
-                        <span className="font-mono font-bold text-gray-900 bg-gray-100 px-2 py-1 rounded text-xs">
-                          {fr.fracao}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-gray-700">{fr.nome}</td>
-                      <td className="px-4 py-3 text-center">
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${
-                          fr.tipo === "habitacao" ? "bg-blue-100 text-blue-700" :
-                          fr.tipo === "loja"      ? "bg-purple-100 text-purple-700" :
-                          "bg-gray-100 text-gray-600"
-                        }`}>
-                          {fr.tipo}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right text-gray-600 font-mono text-xs">{fr.permilage.toFixed(2)}</td>
-                      <td className="px-4 py-3 text-right text-gray-700">{fr.numPagamentos}</td>
-                      <td className="px-4 py-3 text-right font-medium text-gray-900">{formatEuro(fr.totalPago)}</td>
-                      <td className="px-4 py-3 text-center">
-                        {fr.identificadoNoBanco ? (
-                          <span className="text-xs text-green-700 font-medium">✓ Identificado</span>
-                        ) : (
-                          <span className="text-xs text-amber-700">Sem dados</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot className="bg-gray-50 border-t">
-                  <tr>
-                    <td colSpan={4} className="px-4 py-3 text-sm font-medium text-gray-700">Total</td>
-                    <td className="px-4 py-3 text-right font-medium">{fracoes.reduce((s, f) => s + f.numPagamentos, 0)}</td>
-                    <td className="px-4 py-3 text-right font-bold text-gray-900">
-                      {formatEuro(fracoes.reduce((s, f) => s + f.totalPago, 0))}
-                    </td>
-                    <td></td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ── CATEGORIAS ── */}
       {tab === "categorias" && (
         <div className="space-y-4">
           <div className="bg-white rounded-xl border p-5">
-            <h3 className="font-semibold text-gray-900 mb-4">Distribuição por Categoria (condomínio + obras)</h3>
-            <div className="space-y-3">
-              {categorias.map(c => {
-                const maxTotal = categorias[0]?.total ?? 1;
-                return (
-                  <div key={c.categoria} className="flex items-center gap-3">
-                    <div className="w-52 text-sm text-gray-700 truncate shrink-0" title={c.categoria}>
-                      {c.categoria}
+            <h3 className="font-semibold text-gray-900 mb-4">Distribuição por Categoria</h3>
+            {categorias.length === 0 ? (
+              <p className="text-sm text-gray-400">Sem transacções classificadas.</p>
+            ) : (
+              <div className="space-y-3">
+                {categorias.map(c => {
+                  const maxTotal = categorias[0]?.total ?? 1;
+                  return (
+                    <div key={c.categoria} className="flex items-center gap-3">
+                      <div className="w-52 text-sm text-gray-700 truncate shrink-0" title={c.categoria}>
+                        {c.categoria}
+                      </div>
+                      <div className="flex-1 bg-gray-100 rounded-full h-3">
+                        <div
+                          className="bg-blue-500 h-3 rounded-full"
+                          style={{ width: `${(c.total / maxTotal) * 100}%` }}
+                        />
+                      </div>
+                      <span className="text-sm font-medium w-28 text-right">{formatEuro(c.total)}</span>
+                      <span className="text-xs text-gray-500 w-16 text-right">{c.count} mov.</span>
                     </div>
-                    <div className="flex-1 bg-gray-100 rounded-full h-3">
-                      <div
-                        className="bg-blue-500 h-3 rounded-full"
-                        style={{ width: `${(c.total / maxTotal) * 100}%` }}
-                      />
-                    </div>
-                    <span className="text-sm font-medium w-28 text-right">{formatEuro(c.total)}</span>
-                    <span className="text-xs text-gray-500 w-16 text-right">{c.count} mov.</span>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-xl border overflow-hidden">
@@ -537,74 +453,38 @@ export default function MovimentosBancariosPage() {
           </div>
         </div>
       )}
+
       {/* ── RECONCILIAÇÃO ── */}
       {tab === "reconciliacao" && (
         <div className="space-y-6">
-          {/* Engine summary */}
           {reconcData?.resumo && (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <KpiCard label="Total movimentos" value={String(reconcData.resumo.totalMovimentos)} />
               <KpiCard
-                label="Total movimentos"
-                value={String(reconcData.resumo.totalMovimentos)}
-                color="text-gray-900"
-              />
-              <KpiCard
-                label="Categorizados CSV"
-                value={String(reconcData.resumo.porSource?.csv ?? 0)}
-                sub="originalmente no CSV"
-                color="text-blue-600"
-              />
-              <KpiCard
-                label="Categorizados auto"
+                label="Classificados (auto)"
                 value={String(reconcData.resumo.porSource?.auto ?? 0)}
-                sub="engine de reconciliação"
+                sub="com importType definido"
                 color="text-green-600"
               />
               <KpiCard
-                label="Não identificados"
+                label="Por classificar"
                 value={String(reconcData.resumo.porSource?.unmatched ?? 0)}
-                sub={`${reconcData.resumo.percentagemCategorizado}% coberto`}
-                color={(reconcData.resumo.porSource?.unmatched ?? 0) === 0 ? "text-green-600" : "text-red-600"}
+                color={(reconcData.resumo.porSource?.unmatched ?? 0) === 0 ? "text-green-600" : "text-amber-600"}
+              />
+              <KpiCard
+                label="Cobertura"
+                value={`${reconcData.resumo.percentagemCategorizado}%`}
+                color="text-blue-600"
               />
             </div>
           )}
 
-          {/* Portão status */}
-          {reconcData?.portaoStatus && (
-            <div className="bg-white rounded-xl border overflow-hidden">
-              <div className="px-5 py-4 border-b">
-                <h3 className="font-semibold text-gray-900">Estado do Portão por Fração</h3>
-                <p className="text-sm text-gray-500 mt-0.5">Pagamentos portão/garagem identificados no extracto bancário</p>
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-px bg-gray-100">
-                {(reconcData.portaoStatus as any[]).sort((a, b) => (b.pago ? 1 : 0) - (a.pago ? 1 : 0)).map((ps: any) => (
-                  <div key={ps.fracao} className={`bg-white p-3 ${ps.pago ? "border-l-4 border-green-400" : "border-l-4 border-gray-200"}`}>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-bold text-sm text-gray-900">Fração {ps.fracao}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                        ps.pago ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"
-                      }`}>
-                        {ps.pago ? "Pago" : "Em dívida"}
-                      </span>
-                    </div>
-                    <div className="text-xs text-gray-500 truncate">{ps?.nome ?? "—"}</div>
-                    <div className="text-sm font-medium text-gray-700 mt-1">{formatEuro(ps?.amount ?? 0)}</div>
-                    {(ps?.pagamentos?.length ?? 0) > 0 && (
-                      <div className="text-xs text-green-600 mt-1">{ps?.pagamentos?.[0]?.data ?? "—"}</div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Auto-categorised movements */}
-          {reconcData?.autoCatEntradas && (
+          {reconcData?.autoCatEntradas?.length > 0 && (
             <div className="bg-white rounded-xl border overflow-hidden">
               <div className="px-5 py-4 border-b flex items-center justify-between">
                 <div>
-                  <h3 className="font-semibold text-gray-900">Movimentos auto-categorizados</h3>
-                  <p className="text-sm text-gray-500 mt-0.5">Entradas categorizadas pelo engine (não tinham categoria no CSV)</p>
+                  <h3 className="font-semibold text-gray-900">Transacções classificadas</h3>
+                  <p className="text-sm text-gray-500 mt-0.5">Entradas com classificação atribuída</p>
                 </div>
                 <span className="text-sm text-gray-500">{reconcData.autoCatEntradas.length} registos</span>
               </div>
@@ -616,33 +496,31 @@ export default function MovimentosBancariosPage() {
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Descritivo</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Montante</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Categoria</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Fração</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Nota</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {(reconcData.autoCatEntradas as any[]).map((m: any, i: number) => (
                       <tr key={i} className="hover:bg-gray-50">
-                        <td className="px-4 py-2 text-gray-500 whitespace-nowrap">{m?.data ?? "—"}</td>
-                        <td className="px-4 py-2 text-gray-700 max-w-[200px] truncate" title={m?.descritivo}>{m?.descritivo ?? "—"}</td>
-                        <td className="px-4 py-2 text-right font-medium text-green-700">{formatEuro(m?.montante ?? 0)}</td>
+                        <td className="px-4 py-2 text-gray-500 whitespace-nowrap">{m.data ?? "—"}</td>
+                        <td className="px-4 py-2 text-gray-700 max-w-[200px] truncate" title={m.descritivo}>{m.descritivo ?? "—"}</td>
+                        <td className="px-4 py-2 text-right font-medium text-green-700">{formatEuro(m.montante ?? 0)}</td>
                         <td className="px-4 py-2">
                           <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
-                            {m?.categoria ?? "—"}
+                            {m.categoria ?? "—"}
                           </span>
                         </td>
-                        <td className="px-4 py-2">
-                          {m?.subCategoria && (
-                            <span className="font-bold text-blue-700">{m.subCategoria}</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-2 text-xs text-gray-500 max-w-[200px] truncate" title={m?.nota ?? undefined}>{m?.nota ?? "—"}</td>
+                        <td className="px-4 py-2 text-xs text-gray-500 max-w-[200px] truncate" title={m.nota}>{m.nota ?? "—"}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             </div>
+          )}
+
+          {!reconcData && (
+            <div className="text-center py-10 text-gray-400">A carregar...</div>
           )}
         </div>
       )}
