@@ -153,46 +153,55 @@ export default function DashboardPage() {
 
 // ══════════════════════════════════════════════
 // SALDO OPERACIONAL CARD
-// Mostra saldo físico bancário (conta à ordem) com barra de breakdown:
-//   verde = operacional disponível | segmentos coloridos = cativos por gaveta
+// Headline = saldoLiquidoBanco (CC + Obras + FR) — disponibilidade real imediata em banco.
+// Barra mostra:
+//   azul  = Conta à Ordem operacional (CC − cativos)
+//   amber = Cativos virtuais (Motor + Incêndio retidos na CC)
+//   verde = Fundo Reserva (depósito a prazo)
+//   laranja = Obras (depósito a prazo)
 // ══════════════════════════════════════════════
-const GAVETA_COLORS: Record<string, { bar: string; label: string }> = {
-  fundo_reserva: { bar: "#22c55e", label: "Fundo Reserva" },
-  indaqua:       { bar: "#38bdf8", label: "Indaqua" },
-  incendio:      { bar: "#f87171", label: "Incêndio" },
-  portao:        { bar: "#fb923c", label: "Portão" },
-  obras:         { bar: "#fbbf24", label: "Obras" },
-};
-
 function SaldoOperacionalCard({ d }: { d: any }) {
-  const total: number = d.saldoContaCorrenteTotal ?? d.contaCorrente?.saldoConta ?? 0;
-  const operacional: number = d.saldoOperacionalDisponivel ?? total;
-  const cativos = d.valoresCativos ?? {};
-  const cativosTotal: number = cativos.total ?? 0;
+  // ── Valores do backend ────────────────────────────────────────────
+  // saldoLiquidoBanco = CC + Obras + FR (total físico imediato em banco)
+  const totalBanco: number    = d.saldoLiquidoBanco
+    ?? ((d.saldoContaCorrenteTotal ?? 0) + (d.obras?.saldoConta ?? 0) + (d.fundoReserva?.saldoConta ?? 0));
+  const cc: number            = d.saldoContaCorrenteTotal ?? d.contaCorrente?.saldoConta ?? 0;
+  const obras: number         = d.obras?.saldoConta ?? 0;
+  const fr: number            = d.fundoReserva?.saldoConta ?? 0;
+  const cativos               = d.valoresCativos ?? {};
+  const cativosTotal: number  = cativos.total ?? 0;
+  // Operacional = CC − cativos (o que pode ser gasto em despesas correntes)
+  const operacional: number   = d.saldoOperacionalDisponivel ?? Math.max(0, cc - cativosTotal);
 
-  // Build breakdown segments
-  const gavetas = Object.entries(GAVETA_COLORS)
-    .map(([key, meta]) => ({ key, ...meta, value: (cativos[key] ?? 0) as number }))
-    .filter(g => g.value > 0);
+  // ── Segmentos da barra (em relação a totalBanco) ──────────────────
+  const pct = (v: number) => totalBanco > 0 ? Math.max(0.3, (v / totalBanco) * 100) : 0;
 
-  const pct = (v: number) => total > 0 ? Math.max(0.5, (v / total) * 100) : 0;
+  const segmentos = [
+    { key: "operacional", color: "var(--blue-bright)", label: "CC operacional",    value: operacional },
+    ...(cativosTotal > 0 ? [{ key: "cativos", color: "#fb923c", label: "Cativos (Motor/Incêndio)", value: cativosTotal }] : []),
+    ...(fr    > 0 ? [{ key: "fr",    color: "#22c55e", label: "Fundo Reserva",    value: fr    }] : []),
+    ...(obras > 0 ? [{ key: "obras", color: "#fbbf24", label: "Obras (Abanca)",   value: obras }] : []),
+  ];
 
   return (
     <div className="rounded-xl border p-5 space-y-4" style={{ background: "var(--bg-surface)", borderColor: "var(--border)" }}>
-      {/* Header */}
+      {/* Header — headline = total físico em banco */}
       <div className="flex items-center justify-between">
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: "var(--text-muted)" }}>
-            Conta à Ordem — Santander
+            Saldo líquido em banco
           </p>
           <p className="text-3xl font-mono font-bold tracking-tight mt-0.5" style={{ color: "var(--text-primary)" }}>
-            {formatEuro(total)}
+            {formatEuro(totalBanco)}
+          </p>
+          <p className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>
+            CC {formatEuro(cc)} + Obras {formatEuro(obras)} + FR {formatEuro(fr)}
           </p>
         </div>
         <div className="text-right">
           <div className="flex items-center gap-1.5 justify-end mb-1">
             <Unlock size={13} style={{ color: "var(--green)" }} />
-            <p className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Disponível</p>
+            <p className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>CC disponível</p>
           </div>
           <p className="text-xl font-mono font-bold" style={{ color: "var(--green)" }}>
             {formatEuro(operacional)}
@@ -208,39 +217,26 @@ function SaldoOperacionalCard({ d }: { d: any }) {
         </div>
       </div>
 
-      {/* Breakdown bar */}
+      {/* Breakdown bar — proporcional ao totalBanco */}
       <div>
         <div className="flex h-3 rounded-full overflow-hidden gap-px" style={{ background: "var(--bg-elevated)" }}>
-          {/* Operacional segment */}
-          <div
-            className="rounded-l-full transition-all duration-500"
-            style={{ width: `${pct(operacional)}%`, background: "var(--green)", opacity: 0.85 }}
-          />
-          {/* Cativos segments */}
-          {gavetas.map((g, i) => (
+          {segmentos.map((s, i) => (
             <div
-              key={g.key}
-              className={i === gavetas.length - 1 ? "rounded-r-full" : ""}
-              style={{ width: `${pct(g.value)}%`, background: g.bar }}
+              key={s.key}
+              className={`transition-all duration-500${i === 0 ? " rounded-l-full" : ""}${i === segmentos.length - 1 ? " rounded-r-full" : ""}`}
+              style={{ width: `${pct(s.value)}%`, background: s.color, opacity: s.key === "operacional" ? 0.9 : 1 }}
             />
           ))}
         </div>
 
         {/* Legend */}
         <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
-          <div className="flex items-center gap-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
-            <div className="w-2.5 h-2.5 rounded-sm" style={{ background: "var(--green)", opacity: 0.85 }} />
-            Operacional
-          </div>
-          {gavetas.map(g => (
-            <div key={g.key} className="flex items-center gap-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
-              <div className="w-2.5 h-2.5 rounded-sm" style={{ background: g.bar }} />
-              {g.label} ({formatEuro(g.value)})
+          {segmentos.map(s => (
+            <div key={s.key} className="flex items-center gap-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
+              <div className="w-2.5 h-2.5 rounded-sm" style={{ background: s.color, opacity: s.key === "operacional" ? 0.9 : 1 }} />
+              {s.label} <span className="font-mono ml-0.5">{formatEuro(s.value)}</span>
             </div>
           ))}
-          {gavetas.length === 0 && (
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>Sem cativos — 100% disponível</span>
-          )}
         </div>
       </div>
     </div>

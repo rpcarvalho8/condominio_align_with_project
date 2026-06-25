@@ -1315,10 +1315,14 @@ export const dashboard = new Hono()
       pagamentosNaoRegistados: PAGAMENTOS_NAO_CATEGORIZADOS,
 
       // ── SALDO OPERACIONAL (nova gaveta de topo) ─────────────────────────────
-      // saldoContaCorrenteTotal = saldo físico bancário (inclui cativos)
-      // valoresCativos          = dinheiro comprometido com gavetas (ainda não transferido)
-      // saldoOperacionalDisponivel = o que pode ser gasto em despesas correntes
+      // saldoContaCorrenteTotal   = saldo físico Conta à Ordem (inclui cativos)
+      // saldoLiquidoBanco         = CC + Obras + FR — total real imediato em banco
+      // valoresCativos            = dinheiro comprometido retido na Conta à Ordem
+      // saldoOperacionalDisponivel = CC − cativos − débitos não categorizados
       saldoContaCorrenteTotal: saldos.saldo_conta_corrente,
+      saldoLiquidoBanco: Math.round(
+        (saldos.saldo_conta_corrente + saldos.saldo_obras + saldos.saldo_fundo_reserva) * 100
+      ) / 100,
       saldoOperacionalDisponivel,
       valoresCativos: {
         // Totais por gaveta
